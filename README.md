@@ -17,7 +17,7 @@ déployable en une commande.
 | Rapports IA | [`reports/`](reports/README.md) | `dnext-trade-reports` | Adnan |
 | Frontend de démo | [`frontend/`](frontend/) | `dnext-trade-frontend` (Amplify) | Adnan |
 
-Les détails de chaque composant (choix, schémas, limites) sont dans son README.
+Les détails de chaque composant (choix, schémas, limites) sont dans leur README respectifs.
 
 ## Conventions communes
 
