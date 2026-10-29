@@ -1,0 +1,43 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  DNEXT - frontend de demo heberge sur AWS Amplify Hosting. Pas de depot Git relie :
+  frontend/scripts/deploy.sh publie un zip (index.html + config.js) sur la branche main.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dnext-trade
+  BranchName:
+    Type: String
+    Default: main
+
+Resources:
+  App:
+    Type: AWS::Amplify::App
+    Properties:
+      Name: !Sub ${ProjectName}-frontend
+      Description: Heatmap des anomalies et demande de rapports IA
+      Platform: WEB
+      # config.js porte l'URL de l'API : ne pas le garder en cache apres un redeploiement
+      CustomHeaders: |
+        customHeaders:
+          - pattern: '**/*'
+            headers:
+              - key: Cache-Control
+                value: 'no-cache'
+
+  Branch:
+    Type: AWS::Amplify::Branch
+    Properties:
+      AppId: !GetAtt App.AppId
+      BranchName: !Ref BranchName
+      Stage: PRODUCTION
+      EnableAutoBuild: false
+
+Outputs:
+  AppId:
+    Value: !GetAtt App.AppId
+  BranchName:
+    Value: !GetAtt Branch.BranchName
+  Url:
+    Value: !Sub https://${BranchName}.${App.DefaultDomain}

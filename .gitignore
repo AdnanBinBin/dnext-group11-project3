@@ -1,0 +1,18 @@
+# Artefacts de build (zips Lambda, couche Python, templates packagés)
+.build/
+build/
+*.zip
+
+# Sorties locales (PDF de test, rapports téléchargés)
+out/
+
+# Frontend Vue : dépendances, build et configuration générée par frontend/scripts/serve.sh
+frontend/node_modules/
+frontend/dist/
+frontend/public/config.js
+frontend/config.js
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

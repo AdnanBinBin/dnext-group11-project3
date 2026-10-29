@@ -1,0 +1,27 @@
+{
+  "reporter": "FRA",
+  "partner": "DZA",
+  "hs_code": "1001",
+  "product": "Wheat",
+  "period": "2023",
+  "frequency": "A",
+  "export_value_usd": 540000000,
+  "export_weight_kg": 2000000000,
+  "import_value_usd": 810000000,
+  "import_weight_kg": 2100000000,
+  "history": [
+    {"period": "2019", "export_value_usd": 380000000, "export_weight_kg": 1600000000, "import_value_usd": 420000000, "import_weight_kg": 1650000000},
+    {"period": "2020", "export_value_usd": 400000000, "export_weight_kg": 1700000000, "import_value_usd": 445000000, "import_weight_kg": 1720000000},
+    {"period": "2021", "export_value_usd": 470000000, "export_weight_kg": 1750000000, "import_value_usd": 515000000, "import_weight_kg": 1780000000},
+    {"period": "2022", "export_value_usd": 620000000, "export_weight_kg": 1800000000, "import_value_usd": 700000000, "import_weight_kg": 1850000000},
+    {"period": "2023", "export_value_usd": 540000000, "export_weight_kg": 2000000000, "import_value_usd": 810000000, "import_weight_kg": 2100000000},
+    {"period": "2024", "export_value_usd": 500000000, "export_weight_kg": 1950000000, "import_value_usd": 560000000, "import_weight_kg": 1980000000}
+  ],
+  "peers": [
+    {"partner": "DZA", "export_value_usd": 540000000, "export_weight_kg": 2000000000, "import_value_usd": 810000000, "import_weight_kg": 2100000000},
+    {"partner": "EGY", "export_value_usd": 412500000, "export_weight_kg": 1650000000, "import_value_usd": 470250000, "import_weight_kg": 1700000000},
+    {"partner": "MAR", "export_value_usd": 318000000, "export_weight_kg": 1200000000, "import_value_usd": 336000000, "import_weight_kg": 1150000000},
+    {"partner": "TUN", "export_value_usd": 150000000, "export_weight_kg": 580000000, "import_value_usd": 165000000, "import_weight_kg": 590000000},
+    {"partner": "ITA", "export_value_usd": 90000000, "export_weight_kg": 330000000, "import_value_usd": 97000000, "import_weight_kg": 335000000}
+  ]
+}

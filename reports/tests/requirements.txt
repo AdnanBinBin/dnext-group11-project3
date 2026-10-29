@@ -1,0 +1,3 @@
+-r ../layer/requirements.txt
+boto3
+pytest

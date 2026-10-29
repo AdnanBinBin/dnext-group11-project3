@@ -1,0 +1,2 @@
+# Embarqué dans le zip de la Lambda (pandas, numpy, pyarrow et boto3 viennent du layer "AWS SDK for pandas")
+openpyxl==3.1.5

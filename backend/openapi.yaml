@@ -1,0 +1,102 @@
+openapi: 3.0.3
+info:
+  title: DNEXT Trade Anomaly API
+  version: 1.0.0
+  description: |
+    API commune : consultation des resultats Gold (stack backend) et rapports IA
+    (routes /api/v1/reports, stack reports). Erreurs au format {"error": "..."}.
+paths:
+  /api/v1/health:
+    get:
+      summary: Etat de la Lambda (sans appel Athena)
+      responses:
+        '200': {description: Healthy}
+  /api/v1/filters:
+    get:
+      summary: Exportateurs, produits HS4, frequences disponibles
+      responses:
+        '200': {description: Configuration du dashboard}
+  /api/v1/heatmap:
+    get:
+      summary: Heatmap des dix partenaires de plus forte valeur declaree
+      description: |
+        Une cellule par partenaire et periode. `flagged` si au moins une paire
+        anormale, `consistent` si au moins une paire valide et aucune anomalie,
+        `no_match` si aucune paire comparable. Les donnees sont pre-calculees.
+      parameters:
+        - {in: query, name: exporter, required: true, schema: {type: string, example: ARG}}
+        - {in: query, name: product, required: true, schema: {type: string, example: '1001'}}
+        - {in: query, name: frequency, schema: {type: string, enum: [monthly, quarterly, yearly], default: yearly}}
+        - {in: query, name: start, schema: {type: string, example: '2023-01'}}
+        - {in: query, name: end, schema: {type: string, example: '2023-12'}}
+      responses:
+        '200': {description: Cellules de la heatmap}
+        '400': {description: Parametres invalides}
+  /api/v1/anomalies:
+    get:
+      summary: Liste des anomalies filtrées
+      description: Pour afficher les anomalies d'une cellule, filtrer par exporter, importer, product, start et end.
+      parameters:
+        - {in: query, name: exporter, schema: {type: string, example: ARG}}
+        - {in: query, name: importer, schema: {type: string, example: BRA}}
+        - {in: query, name: product, schema: {type: string, example: '1001'}}
+        - {in: query, name: start, schema: {type: string, example: '2023-01'}}
+        - {in: query, name: end, schema: {type: string, example: '2023-03'}}
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+      responses:
+        '200': {description: Liste des anomalies}
+        '400': {description: Parametres invalides}
+  /api/v1/anomalies/{id}:
+    get:
+      summary: Détail d'une paire par son identifiant stable
+      parameters:
+        - {in: path, name: id, required: true, schema: {type: string, pattern: '^[0-9A-F]{32}$'}}
+      responses:
+        '200': {description: Detail de la paire}
+        '404': {description: Anomalie introuvable}
+  /api/v1/reports:
+    post:
+      summary: Demande un rapport IA pour une anomalie (asynchrone)
+      description: |
+        Lance le workflow Step Functions. Si un rapport non echoue existe deja pour
+        cette anomalie, il est renvoye (200, reused=true) sans nouvel appel Bedrock,
+        sauf si force=true.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [anomaly_id]
+              properties:
+                anomaly_id: {type: string, pattern: '^[0-9A-Fa-f]{32}$'}
+                language: {type: string, enum: [fr, en], default: fr}
+                force: {type: boolean, default: false}
+      responses:
+        '202': {description: 'Demande acceptee : {report_id, status: PENDING, status_url}'}
+        '200': {description: Rapport existant reutilise}
+        '400': {description: Parametres invalides}
+    get:
+      summary: Rapports deja generes pour une anomalie
+      parameters:
+        - {in: query, name: anomaly_id, required: true, schema: {type: string, pattern: '^[0-9A-Fa-f]{32}$'}}
+      responses:
+        '200': {description: 'Liste {anomaly_key, reports: [...]}'}
+  /api/v1/reports/{report_id}:
+    get:
+      summary: Statut d'un rapport
+      description: status PENDING, RUNNING, COMPLETED (avec title, pdf_url, json_url presignees 1 h) ou FAILED (avec error).
+      parameters:
+        - {in: path, name: report_id, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Statut du rapport}
+        '404': {description: Rapport introuvable}
+  /api/v1/reports/{report_id}/pdf:
+    get:
+      summary: Redirection vers le PDF du rapport
+      parameters:
+        - {in: path, name: report_id, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '302': {description: Redirection vers l'URL presignee du PDF}
+        '409': {description: Rapport pas encore disponible}
+        '404': {description: Rapport introuvable}

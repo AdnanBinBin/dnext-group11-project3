@@ -1,0 +1,398 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  DNEXT - Generation asynchrone de rapports IA sur une anomalie Gold
+  (API Gateway -> Step Functions -> Lambda/Athena -> Bedrock -> PDF dans S3, suivi dans DynamoDB).
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: dnext-trade
+    Description: Prefixe commun des ressources du projet (config.env PROJECT).
+  BackendApiId:
+    Type: String
+    Description: ID de l'API HTTP de la stack backend, sur laquelle on ajoute les routes /api/v1/reports.
+  BedrockModelId:
+    Type: String
+    Default: eu.anthropic.claude-haiku-4-5-20251001-v1:0
+  ReportLanguage:
+    Type: String
+    Default: fr
+    AllowedValues: [fr, en]
+  AthenaDatabase:
+    Type: String
+    Default: dnext_trade
+    Description: Base Glue de la table Gold. Vide = mode autonome (chiffres fournis dans la requete).
+  GoldTable:
+    Type: String
+    Default: mirror_matches
+  AthenaWorkGroup:
+    Type: String
+    Default: dnext-trade-wg
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [x86_64]
+    Handler: app.handler
+    MemorySize: 512
+    Timeout: 60
+    Tags:
+      component: reports
+    Environment:
+      Variables:
+        REPORTS_TABLE: !Ref ReportsTable
+        REPORTS_BUCKET: !Ref ReportsBucket
+        GAP_THRESHOLD: '0.35'
+
+Resources:
+
+  # ---------- Stockage ----------
+
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Prefix}-reports-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # Statut et metadonnees de chaque demande de rapport
+  ReportsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Prefix}-reports
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: report_id
+          AttributeType: S
+        - AttributeName: anomaly_key
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: report_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: by-anomaly
+          KeySchema:
+            - AttributeName: anomaly_key
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # matplotlib + fpdf2, construit par reports/scripts/deploy.sh dans reports/.build/layer
+  PdfDepsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub ${Prefix}-reports-pdf-deps
+      ContentUri: ../.build/layer
+      CompatibleRuntimes: [python3.13]
+      CompatibleArchitectures: [x86_64]
+
+  # ---------- API : routes ajoutees a l'API HTTP du backend ----------
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Prefix}-reports-api
+      CodeUri: ../src/api
+      Timeout: 15
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref ReportStateMachine
+          REPORT_LANGUAGE: !Ref ReportLanguage
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReportsTable
+        - S3ReadPolicy:
+            BucketName: !Ref ReportsBucket
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt ReportStateMachine.Name
+
+  ReportsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref BackendApiId
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  RouteCreateReport:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref BackendApiId
+      RouteKey: 'POST /api/v1/reports'
+      Target: !Sub integrations/${ReportsIntegration}
+
+  RouteListReports:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref BackendApiId
+      RouteKey: 'GET /api/v1/reports'
+      Target: !Sub integrations/${ReportsIntegration}
+
+  RouteGetReport:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref BackendApiId
+      RouteKey: 'GET /api/v1/reports/{report_id}'
+      Target: !Sub integrations/${ReportsIntegration}
+
+  RouteDownloadReport:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref BackendApiId
+      RouteKey: 'GET /api/v1/reports/{report_id}/pdf'
+      Target: !Sub integrations/${ReportsIntegration}
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ApiFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BackendApiId}/*/*/api/v1/reports*
+
+  # ---------- Etapes du workflow ----------
+
+  # 1. Collecter : anomalie, historique et pays comparables dans la table Gold (Athena)
+  CollectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Prefix}-reports-collect
+      CodeUri: ../src/collect
+      Environment:
+        Variables:
+          ATHENA_DATABASE: !Ref AthenaDatabase
+          ATHENA_TABLE: !Ref GoldTable
+          ATHENA_WORKGROUP: !Ref AthenaWorkGroup
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [athena:StartQueryExecution, athena:GetQueryExecution,
+                       athena:GetQueryResults, athena:StopQueryExecution, athena:GetWorkGroup]
+              Resource: !Sub arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${AthenaWorkGroup}
+            - Effect: Allow
+              Action: [glue:GetDatabase, glue:GetTable, glue:GetPartitions]
+              Resource:
+                - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog
+                - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${AthenaDatabase}
+                - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${AthenaDatabase}/${GoldTable}
+            # Lecture des Parquet Gold, ecriture des resultats dans le bucket du workgroup
+            - Effect: Allow
+              Action: [s3:ListBucket, s3:GetBucketLocation]
+              Resource:
+                - !Sub arn:aws:s3:::${Prefix}-gold-${AWS::AccountId}
+                - !Sub arn:aws:s3:::${Prefix}-athena-${AWS::AccountId}
+            - Effect: Allow
+              Action: [s3:GetObject]
+              Resource: !Sub arn:aws:s3:::${Prefix}-gold-${AWS::AccountId}/*
+            - Effect: Allow
+              Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
+              Resource: !Sub arn:aws:s3:::${Prefix}-athena-${AWS::AccountId}/*
+
+  # 2. Expliquer : Bedrock redige le contenu structure du rapport
+  NarrateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Prefix}-reports-narrate
+      CodeUri: ../src/narrate
+      Timeout: 120
+      Environment:
+        Variables:
+          MODEL_ID: !Ref BedrockModelId
+          REPORT_LANGUAGE: !Ref ReportLanguage
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [bedrock:InvokeModel]
+              Resource:
+                # Profil d'inference inter-regions (eu.*) et modeles sous-jacents
+                - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}
+                - arn:aws:bedrock:*::foundation-model/anthropic.claude-*
+
+  # 3. Produire : graphiques + PDF dans S3
+  RenderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Prefix}-reports-render
+      CodeUri: ../src/render
+      MemorySize: 1024
+      Timeout: 120
+      Layers:
+        - !Ref PdfDepsLayer
+      Environment:
+        Variables:
+          MPLCONFIGDIR: /tmp/matplotlib
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ReportsBucket
+
+  # ---------- Orchestration ----------
+
+  ReportStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub ${Prefix}-report-workflow
+      Type: STANDARD
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CollectFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref NarrateFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref RenderFunction
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReportsTable
+      DefinitionSubstitutions:
+        CollectFunctionArn: !GetAtt CollectFunction.Arn
+        NarrateFunctionArn: !GetAtt NarrateFunction.Arn
+        RenderFunctionArn: !GetAtt RenderFunction.Arn
+        ReportsTable: !Ref ReportsTable
+      Definition:
+        Comment: Generation d'un rapport IA pour une anomalie (collecter, expliquer, produire, conserver)
+        TimeoutSeconds: 600
+        StartAt: MarkRunning
+        States:
+          MarkRunning:
+            Type: Task
+            Resource: arn:aws:states:::dynamodb:updateItem
+            Parameters:
+              TableName: ${ReportsTable}
+              Key:
+                report_id:
+                  S.$: $.report_id
+              UpdateExpression: 'SET #s = :s, updated_at = :t'
+              ExpressionAttributeNames:
+                '#s': status
+              ExpressionAttributeValues:
+                ':s':
+                  S: RUNNING
+                ':t':
+                  S.$: $$.State.EnteredTime
+            ResultPath: null
+            Next: CollectContext
+
+          CollectContext:
+            Type: Task
+            Resource: ${CollectFunctionArn}
+            ResultPath: $.context
+            Retry:
+              - ErrorEquals: [Lambda.ServiceException, Lambda.AWSLambdaException, Lambda.SdkClientException, Lambda.TooManyRequestsException]
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: MarkFailed
+            Next: WriteNarrative
+
+          WriteNarrative:
+            Type: Task
+            Resource: ${NarrateFunctionArn}
+            ResultPath: $.narrative
+            Retry:
+              - ErrorEquals: [BedrockThrottled]
+                IntervalSeconds: 10
+                MaxAttempts: 3
+                BackoffRate: 2
+              - ErrorEquals: [IncompleteReport]
+                IntervalSeconds: 1
+                MaxAttempts: 1
+              - ErrorEquals: [Lambda.ServiceException, Lambda.AWSLambdaException, Lambda.SdkClientException, Lambda.TooManyRequestsException]
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: MarkFailed
+            Next: RenderPdf
+
+          RenderPdf:
+            Type: Task
+            Resource: ${RenderFunctionArn}
+            ResultPath: $.output
+            Retry:
+              - ErrorEquals: [Lambda.ServiceException, Lambda.AWSLambdaException, Lambda.SdkClientException, Lambda.TooManyRequestsException]
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: MarkFailed
+            Next: MarkCompleted
+
+          MarkCompleted:
+            Type: Task
+            Resource: arn:aws:states:::dynamodb:updateItem
+            Parameters:
+              TableName: ${ReportsTable}
+              Key:
+                report_id:
+                  S.$: $.report_id
+              UpdateExpression: 'SET #s = :s, updated_at = :t, pdf_key = :pdf, json_key = :json, title = :title'
+              ExpressionAttributeNames:
+                '#s': status
+              ExpressionAttributeValues:
+                ':s':
+                  S: COMPLETED
+                ':t':
+                  S.$: $$.State.EnteredTime
+                ':pdf':
+                  S.$: $.output.pdf_key
+                ':json':
+                  S.$: $.output.json_key
+                ':title':
+                  S.$: $.output.title
+            ResultPath: null
+            End: true
+
+          MarkFailed:
+            Type: Task
+            Resource: arn:aws:states:::dynamodb:updateItem
+            Parameters:
+              TableName: ${ReportsTable}
+              Key:
+                report_id:
+                  S.$: $.report_id
+              UpdateExpression: 'SET #s = :s, updated_at = :t, error_type = :e, error_cause = :c'
+              ExpressionAttributeNames:
+                '#s': status
+              ExpressionAttributeValues:
+                ':s':
+                  S: FAILED
+                ':t':
+                  S.$: $$.State.EnteredTime
+                ':e':
+                  S.$: $.error.Error
+                ':c':
+                  S.$: $.error.Cause
+            ResultPath: null
+            Next: Failed
+
+          Failed:
+            Type: Fail
+            Error: ReportGenerationFailed
+
+Outputs:
+  ApiUrl:
+    Description: URL de base de l'API commune (routes /api/v1/reports ajoutees par cette stack)
+    Value: !Sub https://${BackendApiId}.execute-api.${AWS::Region}.amazonaws.com
+  ReportsBucketName:
+    Value: !Ref ReportsBucket
+  ReportsTableName:
+    Value: !Ref ReportsTable
+  StateMachineArn:
+    Value: !Ref ReportStateMachine

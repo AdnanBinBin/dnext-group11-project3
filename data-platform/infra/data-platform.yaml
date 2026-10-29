@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  T-CloudSys Projet 3 (DNEXT) - Plateforme de donnees, couches Bronze -> Silver.
+  S3 (raw / silver / athena), Lambda d'ingestion, Glue Data Catalog, Athena.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dnext-trade
+    AllowedPattern: "^[a-z0-9-]{3,30}$"
+    Description: Prefixe des ressources (minuscules, utilise dans les noms de buckets)
+  GlueDatabaseName:
+    Type: String
+    Default: dnext_trade
+    AllowedPattern: "^[a-z0-9_]+$"
+  ArtifactsBucket:
+    Type: String
+    Description: Bucket contenant le zip de la Lambda (cree par deploy.sh)
+  LambdaCodeKey:
+    Type: String
+    Description: Cle S3 du zip de la Lambda d'ingestion
+  PandasLayerArn:
+    Type: String
+    Description: ARN du layer gere "AWS SDK for pandas" (pandas + pyarrow) pour Python 3.12
+  ExecutionRoleArn:
+    Type: String
+    Default: ""
+    Description: >
+      Role IAM existant pour la Lambda (ex. LabRole sur AWS Academy, ou la creation
+      de roles est interdite). Vide = le template cree un role dedie au moindre privilege.
+
+Conditions:
+  CreateRole: !Equals [!Ref ExecutionRoleArn, ""]
+
+Resources:
+  # ------------------------------------------------------------------ #
+  # Stockage S3 - une zone par bucket
+  # ------------------------------------------------------------------ #
+  RawBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: RawBucketInvokePermission
+    Properties:
+      BucketName: !Sub "${ProjectName}-raw-${AWS::AccountId}"
+      VersioningConfiguration: { Status: Enabled }   # Bronze immuable : on garde chaque version recue
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt IngestFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - { Name: prefix, Value: comtrade/ }
+                  - { Name: suffix, Value: .xlsx }
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt IngestFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - { Name: prefix, Value: comtrade/ }
+                  - { Name: suffix, Value: .csv }
+
+  SilverBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-silver-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-athena-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-query-results
+            Status: Enabled
+            ExpirationInDays: 7
+
+  # ------------------------------------------------------------------ #
+  # Lambda d'ingestion Bronze -> Silver
+  # ------------------------------------------------------------------ #
+  IngestRole:
+    Type: AWS::IAM::Role
+    Condition: CreateRole
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: bronze-to-silver
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadBronze
+                Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion]
+                Resource: !Sub "arn:aws:s3:::${ProjectName}-raw-${AWS::AccountId}/*"
+              - Sid: WriteSilver
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub "${SilverBucket.Arn}/*"
+              - Sid: ListSilver
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt SilverBucket.Arn
+
+  IngestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-ingest-bronze-to-silver"
+      Description: Valide, nettoie et convertit les exports UN Comtrade (Excel) en Parquet Silver
+      Runtime: python3.12
+      Architectures: [x86_64]
+      Handler: handler.lambda_handler
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Ref LambdaCodeKey
+      Layers: [!Ref PandasLayerArn]
+      MemorySize: 2048
+      Timeout: 300
+      Role: !If [CreateRole, !GetAtt IngestRole.Arn, !Ref ExecutionRoleArn]
+      Environment:
+        Variables:
+          SILVER_BUCKET: !Ref SilverBucket
+          SILVER_PREFIX: silver/trade_flows/
+          QUARANTINE_PREFIX: quarantine/trade_flows/
+          REPORT_PREFIX: reports/ingestion/
+      Tags:
+        - { Key: project, Value: !Ref ProjectName }
+
+  IngestInvokeConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref IngestFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 1
+
+  RawBucketInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      # Nom construit (et non !Ref) pour eviter la dependance circulaire bucket <-> permission
+      SourceArn: !Sub "arn:aws:s3:::${ProjectName}-raw-${AWS::AccountId}"
+
+  # ------------------------------------------------------------------ #
+  # Catalogue Glue : schema explicite (pas de crawler -> deterministe et gratuit)
+  # ------------------------------------------------------------------ #
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref GlueDatabaseName
+        Description: DNEXT - donnees UN Comtrade (zone Silver)
+
+  SilverTradeFlowsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: trade_flows
+        Description: Silver - une ligne par declaration Comtrade, validee et typee
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: parquet
+          parquet.compression: SNAPPY
+          # Partition projection : Athena deduit les partitions, pas de MSCK REPAIR
+          projection.enabled: "true"
+          projection.year.type: integer
+          projection.year.range: "2019,2035"
+          storage.location.template: !Sub "s3://${SilverBucket}/silver/trade_flows/year=${!year}"
+        PartitionKeys:
+          - { Name: year, Type: int }
+        StorageDescriptor:
+          Location: !Sub "s3://${SilverBucket}/silver/trade_flows/"
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - { Name: year_month, Type: string, Comment: "YYYY-MM" }
+            - { Name: month, Type: int }
+            - { Name: period_date, Type: date, Comment: "1er jour du mois" }
+            - { Name: reporter_iso3, Type: string, Comment: "Pays declarant" }
+            - { Name: flow, Type: string, Comment: "Export | Import (point de vue du declarant)" }
+            - { Name: partner_iso3, Type: string, Comment: "Partenaire normalise" }
+            - { Name: partner_raw, Type: string, Comment: "Libelle partenaire d'origine" }
+            - { Name: exporter_iso3, Type: string, Comment: "Exportateur du flux physique" }
+            - { Name: importer_iso3, Type: string, Comment: "Importateur du flux physique" }
+            - { Name: price_basis, Type: string, Comment: "FOB (export) | CIF (import)" }
+            - { Name: hs4, Type: string }
+            - { Name: product, Type: string }
+            - { Name: value_usd, Type: double }
+            - { Name: qty_t, Type: double, Comment: "Tonnes, NULL si non declare" }
+            - { Name: partner_is_aggregate, Type: boolean, Comment: "Zone 'nes' Comtrade, sans miroir" }
+            - { Name: dq_flags, Type: string, Comment: "Flags qualite separes par |" }
+            - { Name: source_row, Type: int }
+            - { Name: ingestion_id, Type: string }
+            - { Name: source_file, Type: string }
+            - { Name: ingested_at, Type: timestamp }
+
+  SilverRejectedTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: trade_flows_rejected
+        Description: Quarantaine - lignes source rejetees avec leur motif
+        TableType: EXTERNAL_TABLE
+        Parameters: { classification: parquet }
+        StorageDescriptor:
+          Location: !Sub "s3://${SilverBucket}/quarantine/trade_flows/"
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - { Name: reject_reason, Type: string }
+            - { Name: yearmonth, Type: string }
+            - { Name: reporter, Type: string }
+            - { Name: flow, Type: string }
+            - { Name: partner, Type: string }
+            - { Name: hs4, Type: string }
+            - { Name: product, Type: string }
+            - { Name: value_usd, Type: string }
+            - { Name: qty_t, Type: string }
+            - { Name: source_row, Type: int }
+            - { Name: ingestion_id, Type: string }
+            - { Name: source_file, Type: string }
+
+  # ------------------------------------------------------------------ #
+  # Athena
+  # ------------------------------------------------------------------ #
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "${ProjectName}-wg"
+      Description: Requetes du projet DNEXT
+      RecursiveDeleteOption: true
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 1073741824   # garde-fou budget : 1 Go max par requete
+        EngineVersion: { SelectedEngineVersion: "Athena engine version 3" }
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${AthenaResultsBucket}/query-results/"
+          EncryptionConfiguration: { EncryptionOption: SSE_S3 }
+
+Outputs:
+  RawBucketName:
+    Value: !Ref RawBucket
+  SilverBucketName:
+    Value: !Ref SilverBucket
+  AthenaResultsBucketName:
+    Value: !Ref AthenaResultsBucket
+  IngestFunctionName:
+    Value: !Ref IngestFunction
+  GlueDatabase:
+    Value: !Ref GlueDatabase
+  AthenaWorkGroup:
+    Value: !Ref AthenaWorkGroup

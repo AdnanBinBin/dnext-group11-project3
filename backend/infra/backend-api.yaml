@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DNEXT read-only MVP backend HTTP API, Lambda et acces Athena Gold.
+Parameters:
+  ArtifactBucket:
+    Type: String
+  ArtifactKey:
+    Type: String
+    Default: dnext-backend/backend.zip
+  ProjectName:
+    Type: String
+    Default: dnext-trade
+  GlueDatabase:
+    Type: String
+    Default: dnext_trade
+  GoldTable:
+    Type: String
+    Default: mirror_matches
+  AthenaWorkGroup:
+    Type: String
+    Default: dnext-trade-wg
+Resources:
+  BackendRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: read-athena-gold
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [athena:StartQueryExecution, athena:GetQueryExecution,
+                         athena:GetQueryResults, athena:StopQueryExecution,
+                         athena:GetWorkGroup]
+                Resource: !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${AthenaWorkGroup}'
+              - Effect: Allow
+                Action: [glue:GetDatabase, glue:GetTable, glue:GetPartitions]
+                Resource:
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${GlueDatabase}'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${GlueDatabase}/${GoldTable}'
+              - Effect: Allow
+                Action: [s3:ListBucket, s3:GetBucketLocation]
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ProjectName}-gold-${AWS::AccountId}'
+                  - !Sub 'arn:aws:s3:::${ProjectName}-athena-${AWS::AccountId}'
+              - Effect: Allow
+                Action: [s3:GetObject]
+                Resource: !Sub 'arn:aws:s3:::${ProjectName}-gold-${AWS::AccountId}/*'
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload]
+                Resource: !Sub 'arn:aws:s3:::${ProjectName}-athena-${AWS::AccountId}/*'
+  BackendLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-backend-api'
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt BackendRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      MemorySize: 256
+      Timeout: 29
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          ATHENA_DATABASE: !Ref GlueDatabase
+          GOLD_TABLE: !Ref GoldTable
+          ATHENA_WORKGROUP: !Ref AthenaWorkGroup
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${ProjectName}-api'
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ['*']  # MVP demo only: restrict to Amplify domain before public release
+        AllowMethods: [GET, POST, OPTIONS]  # POST : demandes de rapports IA (stack reports)
+        AllowHeaders: [content-type]
+  ApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt BackendLambda.Arn
+      PayloadFormatVersion: '2.0'
+  ApiRouteHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /api/v1/health'
+      Target: !Sub 'integrations/${ApiIntegration}'
+  ApiRouteFilters:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /api/v1/filters'
+      Target: !Sub 'integrations/${ApiIntegration}'
+  ApiRouteHeatmap:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /api/v1/heatmap'
+      Target: !Sub 'integrations/${ApiIntegration}'
+  ApiRouteAnomalies:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /api/v1/anomalies'
+      Target: !Sub 'integrations/${ApiIntegration}'
+  ApiRouteAnomaly:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /api/v1/anomalies/{id}'
+      Target: !Sub 'integrations/${ApiIntegration}'
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 3
+        ThrottlingRateLimit: 2
+  ApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BackendLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
+Outputs:
+  ApiUrl:
+    Value: !GetAtt HttpApi.ApiEndpoint
+  # La stack reports ajoute ses routes /api/v1/reports sur cette meme API
+  ApiId:
+    Value: !Ref HttpApi

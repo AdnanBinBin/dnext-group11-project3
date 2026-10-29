@@ -1,0 +1,3 @@
+# Dependances de la Lambda render (couche construite par scripts/deploy.sh)
+matplotlib==3.10.*
+fpdf2==2.8.*
