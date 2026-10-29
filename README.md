@@ -1,6 +1,6 @@
 # DNEXT — Cloud-Native Trade Anomaly Detection & Reporting Platform
 
-Projet 3 de T-CloudSys (HES-SO, 2026-2027), groupe 11 : Adnan Binjos, Théo Falcinelli, Alexandre Schmid.
+Projet 3 de TSM_CloudSys (HES-SO, 2026-2027), groupe 11 : Adnan Binjos, Théo Falcinelli, Alexandre Schmid.
 
 La plateforme ingère les déclarations UN Comtrade, rapproche les déclarations d'export (FOB) et
 d'import (CIF) d'un même flux (*mirror matching*), signale les anomalies, les expose dans une
@@ -9,21 +9,6 @@ heatmap et rédige à la demande un rapport PDF expliquant une anomalie avec Ama
 Tout est serverless, sur AWS en **`eu-north-1`** (Stockholm), décrit en CloudFormation et
 déployable en une commande.
 
-## Architecture
-
-```
- data-platform                         backend                                  reports
- ─────────────                         ───────                                  ───────
- Excel Comtrade                        Athena : mirror matching (1 fois)        Step Functions
-   │ S3 Bronze (raw)                     │                                        1. collect   Lambda + Athena (Gold)
-   ▼                                     ▼                                        2. narrate   Lambda + Bedrock (Claude Haiku 4.5)
- Lambda d'ingestion ──► S3 Silver ──► S3 Gold : mirror_matches                    3. render    Lambda → PDF dans S3
-                        Glue trade_flows      Glue mirror_matches                 statut dans DynamoDB
-                                                 │                                   ▲
-                                                 ▼                                   │
- frontend ──HTTPS──►  API Gateway (HTTP API commune)  /api/v1/health, filters, heatmap, anomalies[/{id}]
-                                                      /api/v1/reports[/{id}[/pdf]]  ───┘
-```
 
 | Composant | Dossier | Stack(s) | Responsable |
 |---|---|---|---|
@@ -87,14 +72,6 @@ La Silver n'est réingérée que si elle est vide, et la Gold n'est calculée qu
 ```
 
 Rien n'est planifié : ces scripts ne s'exécutent que lorsqu'on les lance.
-
-## Coûts
-
-Au repos, la plateforme ne coûte presque rien (stockage S3 de quelques dizaines de Mo, aucune
-machine allumée). À l'usage : une requête Athena par appel de l'API (plafond de 1 Go lu par
-requête) et environ 2 centimes de Bedrock par rapport IA. L'API est publique et sans
-authentification (démonstration) : son débit est limité à 2 requêtes/s, et un rapport déjà
-généré pour une anomalie est réutilisé sans nouvel appel à Bedrock.
 
 ## Arborescence
 
