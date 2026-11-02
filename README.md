@@ -19,6 +19,15 @@ déployable en une commande.
 
 Les détails de chaque composant (choix, schémas, limites) sont dans leur README respectifs.
 
+
+## Documentation du projet
+
+Les livrables du projet sont disponibles dans le dossier [`docs/`](docs/) :
+
+- [Rapport du rendu (PDF)](docs/CloudSys_Project3_Group11_Rendu.pdf) - Rendu officiel suivant la template fournie.
+- [Rapport détaillé (PDF)](docs/Documentation_Detaillee.pdf) - architecture, choix technologiques, implémentation, tests et limites.
+- [Présentation finale (PowerPoint)](docs/DNEXT%20–%20Trade%20Anomaly%20Platform%20(v2).pptx) - synthèse de l'architecture, démonstration et résultats.
+
 ## Conventions communes
 
 - **Configuration unique** : [`config.env`](config.env) (préfixe `dnext-trade`, région, base Glue,
@@ -82,4 +91,5 @@ data-platform/        Bronze → Silver (Excel Comtrade, Lambda d'ingestion, Glu
 backend/              Gold (SQL Athena) + API HTTP de consultation (openapi.yaml)
 reports/              workflow de rapports IA (Step Functions, Bedrock, PDF)
 frontend/             application Vue 3 : filtres, heatmap, anomalies, rapports (Amplify Hosting)
+docs/                 rapport détaillé et présentation finale
 ```
